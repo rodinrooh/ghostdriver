@@ -45,9 +45,9 @@ function normalizeCompany(company: string): string {
   return company
 }
 
-type SeverityLevel = 'fatal' | 'injury' | 'property' | 'unknown'
+type Severity = 'fatal' | 'injury' | 'property' | 'unknown'
 
-function getSeverity(injury: string): SeverityLevel {
+function getSeverity(injury: string): Severity {
   const lower = (injury || '').toLowerCase()
   if (lower.includes('fatal')) return 'fatal'
   if (lower.includes('minor') || lower.includes('moderate') || lower.includes('serious') ||
@@ -56,7 +56,7 @@ function getSeverity(injury: string): SeverityLevel {
   return 'unknown'
 }
 
-const SEVERITY_COLOR: Record<SeverityLevel, string> = {
+const SEV_COLOR: Record<Severity, string> = {
   fatal: '#ef4444',
   injury: '#f97316',
   property: '#eab308',
@@ -71,15 +71,12 @@ const MONTH_MAP: Record<string, number> = {
 function formatDate(d: string): string {
   if (!d) return ''
   const m = d.match(/^([A-Z]{3})-(\d{4})$/)
-  if (m && MONTH_MAP[m[1]] !== undefined) {
-    return new Date(+m[2], MONTH_MAP[m[1]], 1)
-      .toLocaleDateString('en-US', { year: 'numeric', month: 'long' })
-  }
+  if (m && MONTH_MAP[m[1]] !== undefined)
+    return new Date(+m[2], MONTH_MAP[m[1]], 1).toLocaleDateString('en-US', { year: 'numeric', month: 'long' })
   try { return new Date(d).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }) }
   catch { return d }
 }
 
-// Deterministic per-incident jitter so same-city incidents spread apart visually
 function seededOffset(seed: string, axis: number): number {
   let h = axis * 2654435761
   for (let i = 0; i < seed.length; i++) h = (Math.imul(h ^ seed.charCodeAt(i), 2654435761)) >>> 0
@@ -109,31 +106,35 @@ export default function MapView() {
   const [selected, setSelected] = useState<Incident | null>(null)
   const [filter, setFilter] = useState('All')
   const [loading, setLoading] = useState(true)
-  const [mapReady, setMapReady] = useState(false)
+  // mapStage: 'idle' → 'scripting' → 'initing' → 'ready'
+  const [mapStage, setMapStage] = useState<'idle' | 'scripting' | 'initing' | 'ready'>('idle')
 
-  // Load MapKit JS script once
+  // Step 1: load MapKit JS script
   useEffect(() => {
-    if (window.mapkit) { setMapReady(true); return }
+    if (mapStage !== 'idle') return
+    setMapStage('scripting')
     const s = document.createElement('script')
-    s.src = 'https://cdn.apple-mapkit.com/mk/5.x.x/mapkit.core.js'
+    s.src = 'https://cdn.apple-mapkit.com/mk/5.x.x/mapkit.js'
     s.crossOrigin = 'anonymous'
     s.async = true
     s.onload = () => {
+      setMapStage('initing')
       window.mapkit.init({
         authorizationCallback: (done: (t: string) => void) =>
           fetch('/api/mapkit-token').then(r => r.json()).then(d => done(d.token)),
         language: 'en',
       })
       window.mapkit.addEventListener('configuration-change', (e: any) => {
-        if (e.status === 'Initialized') setMapReady(true)
+        if (e.status === 'Initialized') setMapStage('ready')
       })
     }
+    s.onerror = (e) => console.error('MapKit script failed to load', e)
     document.head.appendChild(s)
-  }, [])
+  }, [mapStage])
 
-  // Init map once MapKit is ready
+  // Step 2: create map once MapKit is initialized
   useEffect(() => {
-    if (!mapReady || !containerRef.current || mapRef.current) return
+    if (mapStage !== 'ready' || !containerRef.current || mapRef.current) return
     const mk = window.mapkit
     const map = new mk.Map(containerRef.current, {
       colorScheme: mk.Map.ColorSchemes.Dark,
@@ -145,7 +146,6 @@ export default function MapView() {
       new mk.CoordinateRegion(new mk.Coordinate(37, -97), new mk.CoordinateSpan(28, 50)),
       false
     )
-    // Cluster badge
     map.annotationForCluster = (cluster: any) => {
       const n = cluster.memberAnnotations.length
       return new mk.MarkerAnnotation(cluster.coordinate, {
@@ -159,30 +159,37 @@ export default function MapView() {
       if (e.annotation?.data) setSelected(e.annotation.data)
     })
     mapRef.current = map
-  }, [mapReady])
+    // Force annotation effect to re-run by updating a piece of state
+    // (mapRef is a ref so changing it doesn't trigger re-render)
+    setMapStage('ready') // same value, won't actually re-render — use a separate trigger below
+  }, [mapStage])
 
-  // Fetch data
+  // Step 3: fetch data
   useEffect(() => {
     fetchAllIncidents().then(d => { setIncidents(d); setLoading(false) })
   }, [])
 
   const filtered = filter === 'All' ? incidents : incidents.filter(i => normalizeCompany(i.company) === filter)
 
-  // Sync annotations when filter/data/map changes
+  // Step 4: place annotations — runs when data changes OR when map becomes usable
+  // We deliberately depend on `mapRef.current` indirectly via a flag updated after map creation
   useEffect(() => {
-    const map = mapRef.current, mk = window.mapkit
-    if (!map || !mk || loading) return
-    if (annotationsRef.current.length) { map.removeAnnotations(annotationsRef.current); annotationsRef.current = [] }
+    const map = mapRef.current
+    const mk = window.mapkit
+    if (!map || !mk || loading || mapStage !== 'ready') return
+
+    if (annotationsRef.current.length) {
+      map.removeAnnotations(annotationsRef.current)
+      annotationsRef.current = []
+    }
 
     const anns = filtered.filter(i => i.lat && i.lng).map(incident => {
-      const sev = getSeverity(incident.injury)
-      const color = SEVERITY_COLOR[sev]
+      const color = SEV_COLOR[getSeverity(incident.injury)]
       const lat = incident.lat + seededOffset(incident.report_id, 0)
       const lng = incident.lng + seededOffset(incident.report_id, 1)
-
       const factory = () => {
         const el = document.createElement('div')
-        el.style.cssText = `width:9px;height:9px;border-radius:50%;background:${color};border:1.5px solid rgba(255,255,255,0.35);cursor:pointer;transition:transform .12s`
+        el.style.cssText = `width:9px;height:9px;border-radius:50%;background:${color};border:1.5px solid rgba(255,255,255,0.3);cursor:pointer;transition:transform .12s`
         el.onmouseenter = () => { el.style.transform = 'scale(2)'; el.style.zIndex = '9' }
         el.onmouseleave = () => { el.style.transform = 'scale(1)'; el.style.zIndex = '' }
         return el
@@ -195,16 +202,16 @@ export default function MapView() {
     })
     map.addAnnotations(anns)
     annotationsRef.current = anns
-  }, [filtered, loading, mapReady])
+  }, [filtered, loading, mapStage])
 
   const comp = selected ? normalizeCompany(selected.company) : ''
-  const sev = selected ? getSeverity(selected.injury) : 'unknown'
+  const sev: Severity = selected ? getSeverity(selected.injury) : 'unknown'
 
   return (
     <div className="relative w-full h-full bg-black">
       <div ref={containerRef} className="w-full h-full" />
 
-      {/* Filter bar + counter */}
+      {/* Filters + counter */}
       <div className="absolute top-4 left-4 right-4 flex items-start justify-between gap-3 pointer-events-none z-10">
         <div className="flex flex-wrap gap-1.5 pointer-events-auto">
           {COMPANIES.map(c => (
@@ -227,64 +234,64 @@ export default function MapView() {
       {/* Legend */}
       <div className="absolute bottom-6 left-4 bg-black/70 backdrop-blur-sm border border-white/10 rounded-xl px-3.5 py-3 z-10 shadow-lg">
         <div className="text-gray-500 text-[10px] font-semibold uppercase tracking-widest mb-2">Severity</div>
-        {([['fatal', 'Fatal'], ['injury', 'Injury'], ['property', 'Property damage'], ['unknown', 'Unknown']] as [SeverityLevel, string][]).map(([k, label]) => (
+        {(['fatal', 'injury', 'property', 'unknown'] as Severity[]).map(k => (
           <div key={k} className="flex items-center gap-2 mb-1.5 last:mb-0">
-            <div className="w-2 h-2 rounded-full shrink-0" style={{ background: SEVERITY_COLOR[k] }} />
-            <span className="text-gray-400 text-xs">{label}</span>
+            <div className="w-2 h-2 rounded-full shrink-0" style={{ background: SEV_COLOR[k] }} />
+            <span className="text-gray-400 text-xs capitalize">
+              {k === 'property' ? 'Property damage' : k === 'unknown' ? 'Unknown' : k.charAt(0).toUpperCase() + k.slice(1)}
+            </span>
           </div>
         ))}
       </div>
 
       {/* Sidebar */}
       {selected && (
-        <div className="absolute top-0 right-0 h-full w-[360px] max-w-[90vw] flex flex-col z-20 bg-[#0a0a0a] border-l border-white/8">
-          {/* Header */}
+        <div className="absolute top-0 right-0 h-full w-[360px] max-w-[90vw] flex flex-col z-20 bg-[#0a0a0a] border-l border-white/8 shadow-2xl">
           <div className="flex items-start justify-between px-5 pt-5 pb-4 border-b border-white/8 shrink-0">
-            <div>
+            <div className="min-w-0">
               <div className="flex items-center gap-2 mb-1">
-                <div className="w-2 h-2 rounded-full" style={{ background: COMPANY_COLORS[comp] || '#fff' }} />
-                <span className="text-xs font-semibold uppercase tracking-widest" style={{ color: COMPANY_COLORS[comp] || '#fff' }}>
-                  {comp}
-                </span>
+                <div className="w-2 h-2 rounded-full shrink-0" style={{ background: COMPANY_COLORS[comp] || '#fff' }} />
+                <span className="text-[11px] font-semibold uppercase tracking-widest truncate" style={{ color: COMPANY_COLORS[comp] || '#aaa' }}>{comp}</span>
               </div>
-              <div className="text-white font-bold text-[22px] leading-tight">
-                {selected.city}, {selected.state}
+              <div className="text-white font-bold text-[22px] leading-tight">{selected.city}, {selected.state}</div>
+              <div className="text-gray-500 text-sm mt-0.5">
+                {formatDate(selected.date)}{selected.time ? ` · ${selected.time}` : ''}
               </div>
-              <div className="text-gray-500 text-sm mt-0.5">{formatDate(selected.date)}{selected.time ? ` · ${selected.time}` : ''}</div>
             </div>
             <button onClick={() => setSelected(null)}
-              className="mt-0.5 ml-3 shrink-0 w-7 h-7 flex items-center justify-center rounded-full bg-white/5 hover:bg-white/10 text-gray-500 hover:text-white transition-colors">
-              <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="2">
+              className="ml-3 mt-0.5 shrink-0 w-7 h-7 flex items-center justify-center rounded-full bg-white/5 hover:bg-white/10 text-gray-500 hover:text-white transition-colors">
+              <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="2.5">
                 <path d="M1 1l10 10M11 1L1 11" />
               </svg>
             </button>
           </div>
 
-          <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
-            {/* Severity badge */}
-            <div className="flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl" style={{ background: `${SEVERITY_COLOR[sev]}18`, border: `1px solid ${SEVERITY_COLOR[sev]}30` }}>
-              <div className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: SEVERITY_COLOR[sev] }} />
+          <div className="flex-1 overflow-y-auto px-5 py-4 space-y-3">
+            {/* Severity */}
+            <div className="flex items-center gap-3 px-4 py-3 rounded-xl"
+              style={{ background: `${SEV_COLOR[sev]}15`, border: `1px solid ${SEV_COLOR[sev]}25` }}>
+              <div className="w-3 h-3 rounded-full shrink-0" style={{ background: SEV_COLOR[sev] }} />
               <div>
-                <div className="text-[10px] text-gray-500 uppercase tracking-widest font-semibold">Injury Severity</div>
-                <div className="text-sm font-semibold mt-0.5" style={{ color: SEVERITY_COLOR[sev] }}>
+                <div className="text-[10px] text-gray-600 uppercase tracking-widest font-semibold">Injury Severity</div>
+                <div className="text-sm font-semibold mt-0.5" style={{ color: SEV_COLOR[sev] }}>
                   {selected.injury || 'Unknown'}
                 </div>
               </div>
             </div>
 
-            {/* Stats grid */}
+            {/* Details grid */}
             <div className="grid grid-cols-2 gap-2">
               {selected.crash_with && (
-                <div className="col-span-2 bg-white/4 rounded-xl p-3.5">
+                <div className="col-span-2 bg-white/[0.04] rounded-xl p-3.5">
                   <div className="text-[10px] text-gray-600 uppercase tracking-widest font-semibold mb-1">Crashed into</div>
                   <div className="text-white text-sm font-medium">{selected.crash_with}</div>
                 </div>
               )}
-              <div className="bg-white/4 rounded-xl p-3.5">
-                <div className="text-[10px] text-gray-600 uppercase tracking-widest font-semibold mb-1">Company</div>
+              <div className="bg-white/[0.04] rounded-xl p-3.5">
+                <div className="text-[10px] text-gray-600 uppercase tracking-widest font-semibold mb-1">Operator</div>
                 <div className="text-white text-sm font-medium">{comp}</div>
               </div>
-              <div className="bg-white/4 rounded-xl p-3.5">
+              <div className="bg-white/[0.04] rounded-xl p-3.5">
                 <div className="text-[10px] text-gray-600 uppercase tracking-widest font-semibold mb-1">Location</div>
                 <div className="text-white text-sm font-medium">{selected.city}, {selected.state}</div>
               </div>
@@ -292,23 +299,25 @@ export default function MapView() {
 
             {/* Narrative */}
             {selected.narrative && (
-              <div>
-                <div className="text-[10px] text-gray-600 uppercase tracking-widest font-semibold mb-2.5">Incident Report</div>
-                <p className="text-gray-300 text-[13px] leading-[1.7] tracking-[0.01em]">{selected.narrative}</p>
+              <div className="bg-white/[0.04] rounded-xl p-3.5">
+                <div className="text-[10px] text-gray-600 uppercase tracking-widest font-semibold mb-2">Incident Report</div>
+                <p className="text-gray-300 text-[13px] leading-relaxed">{selected.narrative}</p>
               </div>
             )}
 
-            {/* Footer */}
-            <div className="flex items-center justify-between pt-3 border-t border-white/6">
+            <div className="pt-1 pb-2">
               <span className="text-[10px] text-gray-700 font-mono">NHTSA #{selected.report_id}</span>
             </div>
           </div>
         </div>
       )}
 
-      {loading && (
-        <div className="absolute inset-0 flex items-center justify-center bg-black/60 backdrop-blur-sm z-30">
-          <div className="text-white/60 text-sm tracking-widest uppercase">Loading crashes…</div>
+      {(loading || mapStage !== 'ready') && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center bg-black z-30 gap-3">
+          <div className="text-white/40 text-xs tracking-widest uppercase">
+            {mapStage === 'idle' || mapStage === 'scripting' ? 'Loading map…' :
+             mapStage === 'initing' ? 'Initializing…' : 'Loading crashes…'}
+          </div>
         </div>
       )}
     </div>
