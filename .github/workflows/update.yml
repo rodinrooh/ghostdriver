@@ -1,0 +1,59 @@
+name: Update Crash Data
+
+on:
+  schedule:
+    - cron: '0 0 * * 0'  # Sunday midnight UTC
+  workflow_dispatch:
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check Last-Modified header
+        id: check
+        run: |
+          LAST_MOD=$(curl -sI https://static.nhtsa.gov/odi/ffdd/sgo-2021-01/SGO-2021-01_Incident_Reports_ADS.csv | grep -i 'last-modified' | tr -d '\r' | cut -d' ' -f2-)
+          echo "remote=$LAST_MOD" >> $GITHUB_OUTPUT
+          STORED=""
+          if [ -f last_modified.txt ]; then
+            STORED=$(cat last_modified.txt)
+          fi
+          echo "stored=$STORED" >> $GITHUB_OUTPUT
+          if [ "$LAST_MOD" = "$STORED" ]; then
+            echo "changed=false" >> $GITHUB_OUTPUT
+            echo "CSV unchanged, will skip update."
+          else
+            echo "changed=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Set up Python
+        if: steps.check.outputs.changed == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        if: steps.check.outputs.changed == 'true'
+        run: pip install -r scraper/requirements.txt
+
+      - name: Run scraper
+        if: steps.check.outputs.changed == 'true'
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python scraper/scrape.py
+
+      - name: Update last_modified.txt
+        if: steps.check.outputs.changed == 'true'
+        run: echo "${{ steps.check.outputs.remote }}" > last_modified.txt
+
+      - name: Commit updated last_modified.txt
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add last_modified.txt
+          git diff --staged --quiet || git commit -m "chore: update last_modified.txt [skip ci]"
+          git push
