@@ -25,6 +25,13 @@ interface Incident {
 
 const COMPANIES = ['All', 'Waymo', 'Zoox', 'Motional', 'Avride', 'Aurora', 'WeRide']
 
+const CITIES = [
+  { label: 'SF',      lat: 37.7749, lng: -122.4194 },
+  { label: 'LA',      lat: 34.0522, lng: -118.2437 },
+  { label: 'Phoenix', lat: 33.4484, lng: -112.0740 },
+  { label: 'Dallas',  lat: 32.7767, lng: -96.7970  },
+]
+
 const COMPANY_COLORS: Record<string, string> = {
   Waymo: '#00C2FF',
   Zoox: '#FF6B35',
@@ -143,7 +150,7 @@ export default function MapView() {
       showsCompass: mk.FeatureVisibility.Hidden,
     })
     map.setRegionAnimated(
-      new mk.CoordinateRegion(new mk.Coordinate(37, -97), new mk.CoordinateSpan(28, 50)),
+      new mk.CoordinateRegion(new mk.Coordinate(37.7749, -122.4194), new mk.CoordinateSpan(0.18, 0.28)),
       false
     )
     map.annotationForCluster = (cluster: any) => {
@@ -204,6 +211,15 @@ export default function MapView() {
     annotationsRef.current = anns
   }, [filtered, loading, mapStage])
 
+  function flyTo(lat: number, lng: number) {
+    const map = mapRef.current, mk = window.mapkit
+    if (!map || !mk) return
+    map.setRegionAnimated(
+      new mk.CoordinateRegion(new mk.Coordinate(lat, lng), new mk.CoordinateSpan(0.18, 0.28)),
+      true
+    )
+  }
+
   const comp = selected ? normalizeCompany(selected.company) : ''
   const sev: Severity = selected ? getSeverity(selected.injury) : 'unknown'
 
@@ -211,23 +227,37 @@ export default function MapView() {
     <div className="relative w-full h-full bg-black">
       <div ref={containerRef} className="w-full h-full" />
 
-      {/* Filters + counter */}
-      <div className="absolute top-4 left-4 right-4 flex items-start justify-between gap-3 pointer-events-none z-10">
-        <div className="flex flex-wrap gap-1.5 pointer-events-auto">
-          {COMPANIES.map(c => (
-            <button key={c} onClick={() => setFilter(c)}
-              className={`px-3 py-1.5 rounded-full text-xs font-semibold transition-all shadow-lg ${
-                filter === c
-                  ? 'bg-white text-gray-900'
-                  : 'bg-black/70 text-gray-300 border border-white/10 hover:border-white/30 backdrop-blur-sm'
-              }`}>
-              {c}
+      {/* Top controls */}
+      <div className="absolute top-4 left-4 right-4 flex flex-col gap-2 pointer-events-none z-10">
+        <div className="flex items-start justify-between gap-3">
+          {/* Company filters */}
+          <div className="flex flex-wrap gap-1.5 pointer-events-auto">
+            {COMPANIES.map(c => (
+              <button key={c} onClick={() => setFilter(c)}
+                className={`px-3 py-1.5 rounded-full text-xs font-semibold transition-all shadow-lg ${
+                  filter === c
+                    ? 'bg-white text-gray-900'
+                    : 'bg-black/70 text-gray-300 border border-white/10 hover:border-white/30 backdrop-blur-sm'
+                }`}>
+                {c}
+              </button>
+            ))}
+          </div>
+          {/* Counter */}
+          <div className="pointer-events-auto bg-black/70 backdrop-blur-sm border border-white/10 rounded-xl px-4 py-2 text-right shrink-0 shadow-lg">
+            <div className="text-white font-bold text-xl leading-tight tabular-nums">{filtered.length}</div>
+            <div className="text-gray-500 text-xs">crashes since 2021</div>
+          </div>
+        </div>
+
+        {/* City jump buttons */}
+        <div className="flex gap-1.5 pointer-events-auto">
+          {CITIES.map(({ label, lat, lng }) => (
+            <button key={label} onClick={() => flyTo(lat, lng)}
+              className="px-3 py-1.5 rounded-full text-xs font-semibold bg-black/70 text-gray-400 border border-white/10 hover:border-white/30 hover:text-white backdrop-blur-sm transition-all shadow-lg">
+              {label}
             </button>
           ))}
-        </div>
-        <div className="pointer-events-auto bg-black/70 backdrop-blur-sm border border-white/10 rounded-xl px-4 py-2 text-right shrink-0 shadow-lg">
-          <div className="text-white font-bold text-xl leading-tight tabular-nums">{filtered.length}</div>
-          <div className="text-gray-500 text-xs">crashes since 2021</div>
         </div>
       </div>
 
